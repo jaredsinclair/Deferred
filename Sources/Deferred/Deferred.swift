@@ -40,7 +40,7 @@ public final class Deferred<Value>: FutureProtocol, PromiseProtocol {
     /// Creates an instance resolved with `value`.
     public init(filledWith value: Value) {
         storage.withUnsafeMutablePointerToElements { (pointerToElement) in
-            pointerToElement.initialize(to: Storage.box(value))
+            pointerToElement.initialize(to: Storage.boxed(value))
         }
     }
 
@@ -54,8 +54,8 @@ public final class Deferred<Value>: FutureProtocol, PromiseProtocol {
 
     private func notify(flags: DispatchWorkItemFlags, upon queue: DispatchQueue, execute body: @escaping(Value) -> Void) {
         group.notify(flags: flags, queue: queue) { [storage] in
-            guard let ptr = storage.withAtomicPointerToElement({ bnr_atomic_ptr_load($0, .none) }) else { return }
-            body(Storage.unbox(from: ptr))
+            guard let ptr = storage.withAtomicPointerToElement({ bnr_atomic_ptr_load($0, .relaxed) }) else { return }
+            body(Storage.unsafelyUnboxed(from: ptr))
         }
     }
 
@@ -79,25 +79,25 @@ public final class Deferred<Value>: FutureProtocol, PromiseProtocol {
 
     public func wait(until time: DispatchTime) -> Value? {
         guard case .success = group.wait(timeout: time),
-            let ptr = storage.withAtomicPointerToElement({ bnr_atomic_ptr_load($0, .none) }) else { return nil }
+            let ptr = storage.withAtomicPointerToElement({ bnr_atomic_ptr_load($0, .relaxed) }) else { return nil }
 
-        return Storage.unbox(from: ptr)
+        return Storage.unsafelyUnboxed(from: ptr)
     }
 
     // MARK: PromiseProtocol
 
     public var isFilled: Bool {
         return storage.withAtomicPointerToElement {
-            bnr_atomic_ptr_load($0, .none) != nil
+            bnr_atomic_ptr_load($0, .relaxed) != nil
         }
     }
 
     @discardableResult
     public func fill(with value: Value) -> Bool {
-        let box = Storage.box(value)
+        let box = Storage.unsafelyBoxed(value)
 
         let wonRace = storage.withAtomicPointerToElement {
-            bnr_atomic_ptr_compare_and_swap($0, nil, box.toOpaque(), .thread)
+            bnr_atomic_ptr_compare_and_swap($0, nil, box.toOpaque(), .acq_rel)
         }
 
         if wonRace {
@@ -110,29 +110,12 @@ public final class Deferred<Value>: FutureProtocol, PromiseProtocol {
     }
 }
 
-#if swift(>=3.1) && (os(macOS) || os(iOS) || os(tvOS) || os(watchOS))
-private typealias DeferredRaw<T> = Unmanaged<AnyObject>
-#else
-// In order to assign the value of a scalar in a Deferred using atomics, we must
-// box it up into something word-sized. See `atomicInitialize` above.
-private final class Box<T> {
-    let contents: T
+private typealias RawStorage<Value> = AnyObject
 
-    init(_ contents: T) {
-        self.contents = contents
-    }
-}
+private final class DeferredStorage<Value>: ManagedBuffer<Void, RawStorage<Value>?> {
 
-private typealias DeferredRaw<T> = Unmanaged<Box<T>>
-#endif
-
-private final class DeferredStorage<Value>: ManagedBuffer<Void, DeferredRaw<Value>?> {
-
-    typealias _Self = DeferredStorage<Value>
-    typealias Element = DeferredRaw<Value>
-
-    static func create() -> _Self {
-        return unsafeDowncast(super.create(minimumCapacity: 1, makingHeaderWith: { _ in }), to: _Self.self)
+    static func create() -> DeferredStorage<Value> {
+        return unsafeDowncast(super.create(minimumCapacity: 1, makingHeaderWith: { _ in }), to: DeferredStorage<Value>.self)
     }
 
     func withAtomicPointerToElement<Return>(_ body: (UnsafeMutablePointer<UnsafeAtomicRawPointer>) throws -> Return) rethrows -> Return {
@@ -141,28 +124,18 @@ private final class DeferredStorage<Value>: ManagedBuffer<Void, DeferredRaw<Valu
         }
     }
 
-    deinit {
-        guard let ptr = withAtomicPointerToElement({ bnr_atomic_ptr_load($0, .global) }) else { return }
-        Element.fromOpaque(ptr).release()
+    static func boxed(_ value: Value) -> RawStorage<Value>? {
+        return value as AnyObject
     }
 
-    static func unbox(from ptr: UnsafeMutableRawPointer) -> Value {
-        let raw = Element.fromOpaque(ptr)
-        #if swift(>=3.1) && (os(macOS) || os(iOS) || os(tvOS) || os(watchOS))
-        // Contract of using box(_:) counterpart
-        // swiftlint:disable:next force_cast
-        return raw.takeUnretainedValue() as! Value
-        #else
-        return raw.takeUnretainedValue().contents
-        #endif
-    }
-
-    static func box(_ value: Value) -> Element {
-        #if swift(>=3.1) && (os(macOS) || os(iOS) || os(tvOS) || os(watchOS))
+    static func unsafelyBoxed<Value>(_ value: Value) -> Unmanaged<AnyObject> {
         return Unmanaged.passRetained(value as AnyObject)
-        #else
-        return Unmanaged.passRetained(Box(value))
-        #endif
+    }
+
+    static func unsafelyUnboxed<T>(from ptr: UnsafeMutableRawPointer) -> T {
+        let raw = Unmanaged<AnyObject>.fromOpaque(ptr)
+        // swiftlint:disable:next force_cast
+        return raw.takeUnretainedValue() as! T
     }
 
 }

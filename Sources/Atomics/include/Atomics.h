@@ -12,35 +12,29 @@
 #if defined(__APPLE__)
 #include <os/lock.h>
 #else
-#include <stdint.h>
-#include <stdbool.h>
 #include <os/linux_base.h>
 #endif // !__APPLE__
 #include <pthread.h>
 
 #if !defined(OS_ALWAYS_INLINE)
-#if __GNUC__
-#define OS_ALWAYS_INLINE __attribute__((__always_inline__))
-#else
-#define OS_ALWAYS_INLINE
-#endif // !__GNUC__
+# define OS_ALWAYS_INLINE __attribute__((__always_inline__))
 #endif // !OS_ALWAYS_INLINE
 
 // We should be using OS_ENUM, but Swift looks for particular macro patterns.
 #if !defined(SWIFT_ENUM)
-#define SWIFT_ENUM(_name, ...) enum { __VA_ARGS__ } _name##_t
+# define SWIFT_ENUM(_type, _name) enum _name : _type _name; enum  _name : _type
 #endif
 
 OS_ASSUME_NONNULL_BEGIN
 
 OS_SWIFT_NAME(AtomicMemoryOrder)
-typedef SWIFT_ENUM(bnr_atomic_memory_order,
-    bnr_atomic_memory_order_relaxed OS_SWIFT_NAME(none) = __ATOMIC_RELAXED,
-    bnr_atomic_memory_order_acquire OS_SWIFT_NAME(read) = __ATOMIC_ACQUIRE,
-    bnr_atomic_memory_order_release OS_SWIFT_NAME(write) = __ATOMIC_RELEASE,
-    bnr_atomic_memory_order_acq_rel OS_SWIFT_NAME(thread) = __ATOMIC_ACQ_REL,
-    bnr_atomic_memory_order_seq_cst OS_SWIFT_NAME(global) = __ATOMIC_SEQ_CST
-);
+typedef SWIFT_ENUM(int8_t, bnr_atomic_memory_order_t) {
+    bnr_atomic_memory_order_relaxed = __ATOMIC_RELAXED,
+    bnr_atomic_memory_order_acquire = __ATOMIC_ACQUIRE,
+    bnr_atomic_memory_order_release = __ATOMIC_RELEASE,
+    bnr_atomic_memory_order_acq_rel = __ATOMIC_ACQ_REL,
+    bnr_atomic_memory_order_seq_cst = __ATOMIC_SEQ_CST
+};
 
 OS_SWIFT_NAME(UnsafeNativeLock)
 typedef struct {

@@ -1,3 +1,4 @@
+// swift-tools-version:4.0
 //
 //  Package.swift
 //  Deferred
@@ -10,18 +11,17 @@ import PackageDescription
 
 let package = Package(
     name: "Deferred",
-    targets: [
-        Target(name: "Atomics"),
-        Target(name: "Deferred", dependencies: [
-			.Target(name: "Atomics")
-        ]),
-        Target(name: "Task", dependencies: [
-            .Target(name: "Deferred")
+    products: [
+        .library(name: "Deferred", targets: [
+            "Deferred", "Task"
         ])
-    ], exclude: [
-        "Tests/AllTestsCommon.swift"
-    ]
+    ],
+    targets: [
+        .target(name: "Atomics"),
+        .target(name: "Deferred", dependencies: [ "Atomics" ]),
+        .target(name: "Task", dependencies: [ "Deferred" ]),
+        .testTarget(name: "DeferredTests", dependencies: [ "Deferred" ]),
+        .testTarget(name: "TaskTests", dependencies: [ "Task" ])
+    ],
+    swiftLanguageVersions: [ 4 ]
 )
-
-let dylib = Product(name: "Deferred", type: .Library(.Dynamic), modules: "Deferred", "Task")
-products.append(dylib)
