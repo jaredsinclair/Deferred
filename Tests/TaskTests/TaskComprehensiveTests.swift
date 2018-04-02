@@ -69,7 +69,7 @@ private final class TaskProducer {
     static func produceTask() -> Task<Void> {
         return (0 ..< 5).map {
             syncFolder(folderID: String($0))
-        }.allSucceeded()
+        }.allSucceeded().ignored()
     }
 
     static func sync(items: [Item]) -> [Task<()>] {
@@ -85,8 +85,8 @@ private final class TaskProducer {
     }
 
     static private func syncFolder(folderID: String) -> Task<()> {
-        return fetchFolderInfo(folderID: folderID).andThen(upon: DispatchQueue.any()) { (items) in
-            return sync(items: items).allSucceeded()
+        return fetchFolderInfo(folderID: folderID).andThen(upon: .any()) { (items) in
+            return sync(items: items).allSucceeded().ignored()
         }
     }
 
