@@ -46,25 +46,6 @@ import Foundation
 public protocol Executor: class {
     /// Execute the `body` closure.
     func submit(_ body: @escaping() -> Void)
-
-    /// Execute the `workItem`.
-    func submit(_ workItem: DispatchWorkItem)
-
-    /// If the executor is a higher-level wrapper around a dispatch queue,
-    /// may be used instead of `submit(_:)` for more efficient execution.
-    var underlyingQueue: DispatchQueue? { get }
-}
-
-extension Executor {
-    /// By default, submits the closure contents of the work item.
-    public func submit(_ workItem: DispatchWorkItem) {
-        submit(workItem.perform)
-    }
-
-    /// By default, `nil`; the executor's `submit(_:)` is used unconditionally.
-    public var underlyingQueue: DispatchQueue? {
-        return nil
-    }
 }
 
 /// Dispatch queues invoke function bodies submitted to them serially in FIFO
@@ -75,7 +56,7 @@ extension DispatchQueue: Executor {
     /// work onto the concurrent pile. As an alternative to the `.utility` QoS
     /// global queue, work dispatched onto this queue on platforms with support
     /// for QoS will match the QoS of the caller.
-    @nonobjc public static func any() -> DispatchQueue {
+    public static func any() -> DispatchQueue {
         // The technique is described and used in Core Foundation:
         // http://opensource.apple.com/source/CF/CF-1153.18/CFInternal.h
         // https://github.com/apple/swift-corelibs-foundation/blob/master/CoreFoundation/Base.subproj/CFInternal.h#L869-L889
@@ -88,16 +69,8 @@ extension DispatchQueue: Executor {
         return .global(qos: qosClass)
     }
 
-    @nonobjc public func submit(_ body: @escaping() -> Void) {
+    public func submit(_ body: @escaping() -> Void) {
         async(execute: body)
-    }
-
-    @nonobjc public func submit(_ workItem: DispatchWorkItem) {
-        async(execute: workItem)
-    }
-
-    @nonobjc public var underlyingQueue: DispatchQueue? {
-        return self
     }
 }
 
@@ -108,8 +81,12 @@ extension DispatchQueue: Executor {
 /// operations. This is ideal for regulating the call relative to other
 /// operations in the queue.
 extension OperationQueue: Executor {
-    @nonobjc public func submit(_ body: @escaping() -> Void) {
-        addOperation(body)
+    public func submit(_ body: @escaping() -> Void) {
+        if let underlyingQueue = underlyingQueue {
+            underlyingQueue.async(execute: body)
+        } else {
+            addOperation(body)
+        }
     }
 }
 
@@ -119,12 +96,14 @@ extension OperationQueue: Executor {
 /// As an `Executor`, submitted functions are invoked on the next iteration
 /// of the run loop.
 extension CFRunLoop: Executor {
-    @nonobjc public func submit(_ body: @escaping() -> Void) {
+    public func submit(_ body: @escaping() -> Void) {
+        let runLoopModes: CFTypeRef
         #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
-            CFRunLoopPerformBlock(self, CFRunLoopMode.defaultMode.rawValue, body)
+        runLoopModes = CFRunLoopMode.defaultMode.rawValue
         #else
-            CFRunLoopPerformBlock(self, kCFRunLoopDefaultMode, body)
+        runLoopModes = kCFRunLoopDefaultMode
         #endif
+        CFRunLoopPerformBlock(self, runLoopModes, body)
         CFRunLoopWakeUp(self)
     }
 }
@@ -135,7 +114,7 @@ extension CFRunLoop: Executor {
 /// As an `Executor`, submitted functions are invoked on the next iteration
 /// of the run loop.
 extension RunLoop: Executor {
-    @nonobjc public func submit(_ body: @escaping() -> Void) {
+    public func submit(_ body: @escaping() -> Void) {
         if #available(macOS 10.12, iOS 10.0, tvOS 10.0, watchOS 3.0, *) {
             perform(body)
         } else {

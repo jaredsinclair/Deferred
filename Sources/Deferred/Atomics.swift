@@ -39,6 +39,7 @@ private extension Optional where Wrapped == UnsafeMutableRawPointer {
 
 private struct DarwinAtomics {
     let load: @convention(c) (CInt, UnsafeMutableRawPointer, UnsafeMutableRawPointer, bnr_atomic_memory_order_t) -> Void
+    let store: @convention(c) (CInt, UnsafeMutableRawPointer, UnsafeMutableRawPointer, bnr_atomic_memory_order_t) -> Void
     let exchange: @convention(c) (CInt, UnsafeMutableRawPointer, UnsafeMutableRawPointer, UnsafeMutableRawPointer, bnr_atomic_memory_order_t) -> Void
     let compareExchange: @convention(c) (CInt, UnsafeMutableRawPointer, UnsafeMutableRawPointer, UnsafeMutableRawPointer, bnr_atomic_memory_order_t, bnr_atomic_memory_order_t) -> CInt
     let or8: @convention(c) (UnsafeMutablePointer<UInt8>, UInt8, bnr_atomic_memory_order_t) -> UInt8
@@ -48,6 +49,7 @@ private struct DarwinAtomics {
         let library = UnsafeMutableRawPointer(bitPattern: -2)
         return DarwinAtomics(
             load: library.symbol(named: "__atomic_load"),
+            store: library.symbol(named: "__atomic_store"),
             exchange: library.symbol(named: "__atomic_exchange"),
             compareExchange: library.symbol(named: "__atomic_compare_exchange"),
             or8: library.symbol(named: "__atomic_fetch_or_1"),
@@ -80,17 +82,15 @@ func bnr_atomic_ptr_compare_and_swap(_ target: bnr_atomic_ptr_t, _ expected: Uns
 typealias bnr_atomic_flag = Bool
 typealias bnr_atomic_flag_t = UnsafeMutablePointer<bnr_atomic_flag>
 
-func bnr_atomic_flag_load(_ target: bnr_atomic_flag_t, _ order: bnr_atomic_memory_order_t) -> Bool {
+func bnr_atomic_flag_test(_ target: bnr_atomic_flag_t, _ order: bnr_atomic_memory_order_t) -> Bool {
     var result: Bool = false
     DarwinAtomics.shared.load(CInt(MemoryLayout<Bool>.size), target, &result, order)
     return result
 }
 
-func bnr_atomic_flag_test_and_set(_ target: bnr_atomic_flag_t, _ order: bnr_atomic_memory_order_t) -> Bool {
-    var new = true
-    var old = false
-    DarwinAtomics.shared.exchange(CInt(MemoryLayout<Bool>.size), target, &new, &old, order)
-    return old
+func bnr_atomic_flag_set(_ target: bnr_atomic_flag_t, _ order: bnr_atomic_memory_order_t) {
+    var new: Bool = true
+    DarwinAtomics.shared.store(CInt(MemoryLayout<Bool>.size), target, &new, order)
 }
 
 typealias bnr_atomic_bitmask = UInt8
@@ -113,6 +113,8 @@ func bnr_atomic_bitmask_test(_ target: bnr_atomic_bitmask_t, _ mask: UInt8, _ or
     DarwinAtomics.shared.load(CInt(MemoryLayout<UInt8>.size), target, &result, order)
     return (result & mask) != 0
 }
+
+func bnr_atomic_hardware_pause() {}
 #endif
 
 func bnr_atomic_load<T: AnyObject>(_ target: UnsafeMutablePointer<T?>, _ order: bnr_atomic_memory_order_t) -> T? {
@@ -135,4 +137,22 @@ func bnr_atomic_initialize_once<T: AnyObject>(_ target: UnsafeMutablePointer<T?>
     let wonRace = bnr_atomic_ptr_compare_and_swap(atomicTarget, nil, retainedDesired.toOpaque(), .acq_rel)
     if !wonRace { retainedDesired.release() }
     return wonRace
+}
+
+func bnr_atomic_load(_ target: UnsafeMutablePointer<Bool>, _ order: bnr_atomic_memory_order_t) -> Bool {
+    let atomicTarget = UnsafeMutableRawPointer(target).assumingMemoryBound(to: bnr_atomic_flag.self)
+    return bnr_atomic_flag_test(atomicTarget, order)
+}
+
+func bnr_atomic_store(_ target: UnsafeMutablePointer<Bool>, _ order: bnr_atomic_memory_order_t) {
+    let atomicTarget = UnsafeMutableRawPointer(target).assumingMemoryBound(to: bnr_atomic_flag.self)
+    bnr_atomic_flag_set(atomicTarget, order)
+}
+
+func bnr_atomic_initialize_once(_ target: UnsafeMutablePointer<Bool>, _ handler: () -> Void) -> Bool {
+    let atomicTarget = UnsafeMutableRawPointer(target).assumingMemoryBound(to: bnr_atomic_flag.self)
+    guard !bnr_atomic_flag_test(atomicTarget, .acquire) else { return false }
+    handler()
+    bnr_atomic_flag_set(atomicTarget, .release)
+    return true
 }

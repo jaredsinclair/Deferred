@@ -8,63 +8,156 @@
 
 import Dispatch
 
-/// A deferred is a value that may become determined (or "filled") at some point
-/// in the future. Once a deferred value is determined, it cannot change.
-public final class Deferred<Value>: FutureProtocol, PromiseProtocol {
-    // Using `ManagedBuffer` has advantages:
-    //  - The buffer has a stable pointer when locked to a single element.
-    //  - The buffer is appropriately aligned for atomic access.
-    //  - Better `holdsUniqueReference` support allows for future optimization.
-    private typealias Storage =
-        DeferredStorage<Value>
+/// A value that may become determined (or "filled") at some point in the
+/// future. Once determined, it cannot change.
+///
+/// You may subscribe to be notified once the value becomes determined.
+///
+/// Handlers and their captures are strongly referenced until:
+/// - they are executed when the value is determined
+/// - the last copy to this type escapes without the value becoming determined
+///
+/// If the value never becomes determined, a handler submitted to it will never
+/// be executed.
+public struct Deferred<Value> {
+    /// Heap storage that is initialized once and only once from `nil` to a
+    /// reference. See `Deferred.Variant` for more details.
+    fileprivate final class ObjectStorage: ManagedBuffer<Queue, AnyObject?> {
+        static func create() -> ObjectStorage {
+            let storage = unsafeDowncast(super.create(minimumCapacity: 1, makingHeaderWith: { _ in
+                (head: nil, tail: nil)
+            }), to: ObjectStorage.self)
 
-    // Heap storage that is initialized with a value once-and-only-once.
-    private let storage = Storage.create()
-    // A semaphore that keeps efficiently keeps track of a callbacks list.
-    private let group = DispatchGroup()
+            storage.withUnsafeMutablePointers { (_, pointerToValue) in
+                pointerToValue.initialize(to: nil)
+            }
 
-    public init() {
-        storage.withUnsafeMutablePointers { (_, pointerToElement) in
-            pointerToElement.initialize(to: nil)
+            return storage
         }
 
-        group.enter()
+        deinit {
+            withUnsafeMutablePointers { (_, pointerToValue) in
+                _ = pointerToValue.deinitialize(count: 1)
+            }
+        }
+    }
+
+    /// Heap storage that is initialized once and only once using a flag.
+    /// See `Deferred.Variant` for more details.
+    fileprivate final class NativeStorage: ManagedBuffer<(Queue, isInitialized: Bool), Value> {
+        static func create() -> NativeStorage {
+            return unsafeDowncast(super.create(minimumCapacity: 1, makingHeaderWith: { _ in
+                ((head: nil, tail: nil), isInitialized: false)
+            }), to: NativeStorage.self)
+        }
+
+        deinit {
+            withUnsafeMutablePointers { (pointerToHeader, pointerToValue) in
+                if pointerToHeader.pointee.isInitialized {
+                    pointerToValue.deinitialize(count: 1)
+                }
+            }
+        }
+    }
+
+    /// Heap storage that starts initialized. See `Deferred.Variant` for more
+    /// details.
+    fileprivate final class FilledStorage: ManagedBuffer<Value, Void> {
+        static func create(_ value: Value) -> FilledStorage {
+            return unsafeDowncast(super.create(minimumCapacity: 0, makingHeaderWith: { _ in
+                value
+            }), to: FilledStorage.self)
+        }
+    }
+
+    /// Deferred's storage. It, lock-free but thread-safe, should:
+    /// - be initialized with a value once and only once
+    /// - manages a callback queue
+    /// - hold the expected invariants for deallocation
+    ///
+    /// An underlying implementation will be chosen at init. All variants use
+    /// `ManagedBuffer` to guarantee indirect storage. Those that start unfilled
+    /// are also guarantee aligned and heap-allocated addresses for atomic
+    /// access, and are tail-allocated with space for the callbacks queue.
+    ///
+    /// - note: **Q:** Why not just stored properties? Aren't you overthinking
+    ///   it? **A:** We want raw memory because Swift reserves the right to
+    ///   lay out properties anywhere. The initial store during `init` also
+    ///   counts as unsafe access to TSAN.
+    fileprivate enum Variant {
+        case object(ObjectStorage)
+        case native(NativeStorage)
+        case filled(FilledStorage)
+    }
+
+    fileprivate let variant: Variant
+
+    public init() {
+        if Value.self is AnyObject.Type {
+            variant = .object(.create())
+        } else {
+            variant = .native(.create())
+        }
     }
 
     /// Creates an instance resolved with `value`.
     public init(filledWith value: Value) {
-        storage.withUnsafeMutablePointerToElements { (pointerToElement) in
-            pointerToElement.initialize(to: Storage.convertToReference(value))
+        variant = .filled(.create(value))
+    }
+}
+
+// MARK: -
+
+extension Deferred: PromiseProtocol {
+    @discardableResult
+    public func fill(with value: Value) -> Bool {
+        switch variant {
+        case .object(let storage):
+            return storage.withUnsafeMutablePointers { (pointerToQueue, pointerToValue) in
+                guard bnr_atomic_initialize_once(pointerToValue, unsafeBitCast(value, to: AnyObject.self)) else { return false }
+                drain(from: pointerToQueue, continuingWith: value)
+                return true
+            }
+        case .native(let storage):
+            return storage.withUnsafeMutablePointers { (pointerToHeader, pointerToValue) in
+                guard bnr_atomic_initialize_once(&pointerToHeader.pointee.isInitialized, {
+                    pointerToValue.initialize(to: value)
+                }) else { return false }
+                drain(from: &pointerToHeader.pointee.0, continuingWith: value)
+                return true
+            }
+        case .filled:
+            return false
         }
     }
+}
 
-    deinit {
-        if !isFilled {
-            group.leave()
+// MARK: -
+
+extension Deferred: FutureProtocol {
+    /// Appends the `continuation` to the queue. If it's the only item and we are filled,
+    /// drain the queue and invoke it immediately.
+    private func push(_ continuation: @escaping(Value) -> Void) {
+        switch variant {
+        case .object(let storage):
+            storage.withUnsafeMutablePointers { (pointerToQueue, pointerToValue) in
+                guard push(to: pointerToQueue, continuation),
+                    let existingValue = unsafeBitCast(bnr_atomic_load(pointerToValue, .seq_cst), to: Value?.self) else { return }
+                drain(from: pointerToQueue, continuingWith: existingValue)
+            }
+        case .native(let storage):
+            storage.withUnsafeMutablePointers { (pointerToHeader, pointerToValue) in
+                guard push(to: &pointerToHeader.pointee.0, continuation),
+                    bnr_atomic_load(&pointerToHeader.pointee.isInitialized, .seq_cst) else { return }
+                drain(from: &pointerToHeader.pointee.0, continuingWith: pointerToValue.pointee)
+            }
+        case .filled(let storage):
+            continuation(storage.header)
         }
-    }
-
-    // MARK: FutureProtocol
-
-    private func notify(flags: DispatchWorkItemFlags, upon queue: DispatchQueue, execute body: @escaping(Value) -> Void) {
-        group.notify(flags: flags, queue: queue) { [storage] in
-            guard let reference = storage.withUnsafeMutablePointers({ bnr_atomic_load($1, .relaxed) }) else { return }
-            body(Storage.convertFromReference(reference))
-        }
-    }
-
-    public func upon(_ queue: DispatchQueue, execute body: @escaping (Value) -> Void) {
-        notify(flags: [ .assignCurrentContext, .inheritQoS ], upon: queue, execute: body)
     }
 
     public func upon(_ executor: Executor, execute body: @escaping(Value) -> Void) {
-        if let queue = executor as? DispatchQueue {
-            return upon(queue, execute: body)
-        } else if let queue = executor.underlyingQueue {
-            return upon(queue, execute: body)
-        }
-
-        notify(flags: .assignCurrentContext, upon: .any()) { (value) in
+        push { (value) in
             executor.submit {
                 body(value)
             }
@@ -72,69 +165,30 @@ public final class Deferred<Value>: FutureProtocol, PromiseProtocol {
     }
 
     public func wait(until time: DispatchTime) -> Value? {
-        guard case .success = group.wait(timeout: time),
-            let reference = storage.withUnsafeMutablePointers({ bnr_atomic_load($1, .relaxed) }) else { return nil }
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Value?
 
-        return Storage.convertFromReference(reference)
-    }
-
-    // MARK: PromiseProtocol
-
-    @discardableResult
-    public func fill(with value: Value) -> Bool {
-        let reference = Storage.convertToReference(value)
-
-        let wonRace = storage.withUnsafeMutablePointers { (_, pointerToReference) in
-            bnr_atomic_initialize_once(pointerToReference, reference)
+        push { (value) in
+            result = value
+            semaphore.signal()
         }
 
-        if wonRace {
-            group.leave()
-        }
-
-        return wonRace
-    }
-}
-
-private final class DeferredStorage<Value>: ManagedBuffer<Void, AnyObject?> {
-
-    static func create() -> DeferredStorage<Value> {
-        return unsafeDowncast(super.create(minimumCapacity: 1, makingHeaderWith: { _ in }), to: DeferredStorage<Value>.self)
+        guard case .success = semaphore.wait(timeout: time) else { return nil }
+        return result
     }
 
-    deinit {
-        _ = withUnsafeMutablePointers { (_, pointerToReference) in
-            pointerToReference.deinitialize(count: 1)
-        }
-    }
-
-    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
-    static func convertFromReference(_ value: AnyObject) -> Value {
-        // Contract of using box(_:) counterpart
-        // swiftlint:disable:next force_cast
-        return value as! Value
-    }
-
-    static func convertToReference(_ value: Value) -> AnyObject {
-        return value as AnyObject
-    }
-    #else
-    // In order to assign the value in a Deferred using atomics, we must
-    // box it up into something word-sized. See `fill(with:)` above.
-    private final class Box {
-        let wrapped: Value
-        init(_ wrapped: Value) {
-            self.wrapped = wrapped
+    public func peek() -> Value? {
+        switch variant {
+        case .object(let storage):
+            return storage.withUnsafeMutablePointers { (_, pointerToValue) in
+                unsafeBitCast(bnr_atomic_load(pointerToValue, .relaxed), to: Value?.self)
+            }
+        case .native(let storage):
+            return storage.withUnsafeMutablePointers { (pointerToHeader, pointerToValue) in
+                bnr_atomic_load(&pointerToHeader.pointee.isInitialized, .relaxed) ? pointerToValue.pointee : nil
+            }
+        case .filled(let storage):
+            return storage.header
         }
     }
-
-    static func convertToReference(_ value: Value) -> AnyObject {
-        return Box(value)
-    }
-
-    static func convertFromReference(_ value: AnyObject) -> Value {
-        return unsafeDowncast(value, to: Box.self).wrapped
-    }
-    #endif
-
 }

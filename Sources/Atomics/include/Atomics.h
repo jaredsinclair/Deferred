@@ -140,13 +140,13 @@ typedef volatile struct bnr_atomic_flag_s {
 } bnr_atomic_flag, *_Nonnull bnr_atomic_flag_t;
 
 BNR_ATOMIC_INLINE
-bool bnr_atomic_flag_load(bnr_atomic_flag_t target, bnr_atomic_memory_order_t order) {
+bool bnr_atomic_flag_test(bnr_atomic_flag_t target, bnr_atomic_memory_order_t order) {
     return atomic_load_explicit(&target->value, order);
 }
 
 BNR_ATOMIC_INLINE
-bool bnr_atomic_flag_test_and_set(bnr_atomic_flag_t target, bnr_atomic_memory_order_t order) {
-    return atomic_exchange_explicit(&target->value, true, order);
+void bnr_atomic_flag_set(bnr_atomic_flag_t target, bnr_atomic_memory_order_t order) {
+    atomic_store_explicit(&target->value, true, order);
 }
 
 typedef volatile struct bnr_atomic_bitmask_s {
@@ -190,6 +190,17 @@ long bnr_atomic_counter_increment(bnr_atomic_counter_t target) {
 BNR_ATOMIC_INLINE
 long bnr_atomic_counter_decrement(bnr_atomic_counter_t target) {
     return atomic_fetch_sub(&target->value, 1) - 1;
+}
+
+BNR_ATOMIC_INLINE
+void bnr_atomic_hardware_pause(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__("pause");
+#elif defined(__arm__) || defined(__arm64__)
+    __asm__("yield");
+#else
+    __asm__("");
+#endif
 }
 
 #undef SWIFT_ENUM

@@ -30,22 +30,11 @@ public protocol FutureProtocol: CustomDebugStringConvertible, CustomReflectable 
     /// A type that represents the result of some asynchronous operation.
     associatedtype Value
 
-    /// Calls some `body` closure once the value is determined.
-    func upon(_ executor: PreferredExecutor, execute body: @escaping(Value) -> Void)
-
     /// Call some `body` closure once the value is determined.
     ///
     /// If the value is determined, the closure should be submitted to the
     /// `executor` immediately.
     func upon(_ executor: Executor, execute body: @escaping(Value) -> Void)
-
-    /// Checks for and returns a determined value.
-    ///
-    /// An implementation should use a "best effort" to return this value and
-    /// not unnecessarily block in order to to return.
-    ///
-    /// - returns: The determined value, if already filled, or `nil`.
-    func peek() -> Value?
 
     /// Waits synchronously for the value to become determined.
     ///
@@ -55,6 +44,42 @@ public protocol FutureProtocol: CustomDebugStringConvertible, CustomReflectable 
     /// - parameter time: A deadline for the value to be determined.
     /// - returns: The determined value, if filled within the timeout, or `nil`.
     func wait(until time: DispatchTime) -> Value?
+
+    /// Checks for and returns a determined value.
+    ///
+    /// An implementation should use a "best effort" to return this value and
+    /// not unnecessarily block to return.
+    ///
+    /// - returns: The determined value, if already filled, or `nil`.
+    func peek() -> Value?
+
+    /// Returns a future containing the result of mapping `transform` over the
+    /// deferred value.
+    ///
+    /// `map` submits the `transform` to the `executor` once the future's value
+    /// is determined.
+    ///
+    /// - parameter executor: Context to execute the transformation on.
+    /// - parameter transform: Creates something using the deferred value.
+    /// - returns: A new future that is filled once the receiver is determined.
+    func map<NewValue>(upon executor: Executor, transform: @escaping(Value) -> NewValue) -> Future<NewValue>
+
+    /// Begins another asynchronous operation by passing the deferred value to
+    /// `requestNextValue` once it becomes determined.
+    ///
+    /// `andThen` is similar to `map`, but `requestNextValue` returns another
+    /// future instead of an immediate value. Use `andThen` when you want
+    /// the reciever to feed into another asynchronous operation. You might hear
+    /// this referred to as "chaining" or "binding".
+    ///
+    /// - note: It is important to keep in mind the thread safety of the
+    /// `requestNextValue` closure. Creating a new asynchronous task typically
+    /// involves state. Ensure the function is compatible with `executor`.
+    ///
+    /// - parameter executor: Context to execute the transformation on.
+    /// - parameter requestNextValue: Start a new operation with the future value.
+    /// - returns: The new deferred value returned by the `transform`.
+    func andThen<NewFuture: FutureProtocol>(upon executor: Executor, start requestNextValue: @escaping(Value) -> NewFuture) -> Future<NewFuture.Value>
 }
 
 // MARK: - Default implementations

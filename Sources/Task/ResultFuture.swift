@@ -11,20 +11,6 @@ import Deferred
 #endif
 import Dispatch
 
-private extension FutureProtocol where Value: Either {
-    func commonSuccessBody(_ body: @escaping(Value.Right) -> Void) -> (Value) -> Void {
-        return { result in
-            result.withValues(ifLeft: { _ in () }, ifRight: body)
-        }
-    }
-
-    func commonFailureBody(_ body: @escaping(Value.Left) -> Void) -> (Value) -> Void {
-        return { result in
-            result.withValues(ifLeft: body, ifRight: { _ in () })
-        }
-    }
-}
-
 extension FutureProtocol where Value: Either {
     /// Call some `body` closure if the future successfully resolves a value.
     ///
@@ -32,7 +18,19 @@ extension FutureProtocol where Value: Either {
     /// - parameter body: A closure that uses the determined success value.
     /// - see: upon(_:execute:)
     public func uponSuccess(on executor: Executor, execute body: @escaping(Value.Right) -> Void) {
-        upon(executor, execute: commonSuccessBody(body))
+        upon(executor) { (result) in
+            result.withValues(ifLeft: { _ in }, ifRight: body)
+        }
+    }
+
+    /// Call some `body` closure if the future successfully resolves a value.
+    ///
+    /// - see: uponSuccess(on:execute:)
+    /// - see: upon(_:execute:)
+    public func uponSuccess(on executor: PreferredExecutor = Self.defaultUponExecutor, execute body: @escaping(Value.Right) -> Void) {
+        upon(executor) { (result) in
+            result.withValues(ifLeft: { _ in }, ifRight: body)
+        }
     }
 
     /// Call some `body` closure if the future produces an error.
@@ -41,15 +39,9 @@ extension FutureProtocol where Value: Either {
     /// - parameter body: A closure that uses the determined failure value.
     /// - see: upon(_:execute:)
     public func uponFailure(on executor: Executor, execute body: @escaping(Value.Left) -> Void) {
-        upon(executor, execute: commonFailureBody(body))
-    }
-
-    /// Call some `body` closure if the future successfully resolves a value.
-    ///
-    /// - see: uponSuccess(on:execute:)
-    /// - see: upon(_:execute:)
-    public func uponSuccess(on executor: PreferredExecutor = Self.defaultUponExecutor, execute body: @escaping(Value.Right) -> Void) {
-        upon(executor, execute: commonSuccessBody(body))
+        upon(executor) { result in
+            result.withValues(ifLeft: body, ifRight: { _ in })
+        }
     }
 
     /// Call some `body` closure if the future produces an error.
@@ -57,7 +49,9 @@ extension FutureProtocol where Value: Either {
     /// - see: uponFailure(on:execute:)
     /// - see: upon(_:body:)
     public func uponFailure(on executor: PreferredExecutor = Self.defaultUponExecutor, execute body: @escaping(Value.Left) -> Void) {
-        upon(executor, execute: commonFailureBody(body))
+        upon(executor) { result in
+            result.withValues(ifLeft: body, ifRight: { _ in })
+        }
     }
 }
 
